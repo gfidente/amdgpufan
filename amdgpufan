@@ -1,0 +1,146 @@
+#!/usr/bin/python
+
+import argparse
+import glob
+import logging
+import os
+import pathlib
+import signal
+import sys
+import time
+
+import yaml
+import numpy
+
+ROOT_DIR = '/sys/class/drm'
+HWMON_DIR = 'device/hwmon'
+LOG_FORMAT = "%(levelname)s:%(name)s %(message)s"
+DEBUG = bool(os.environ.get('DEBUG', False))
+
+
+logging.basicConfig(stream=sys.stdout, format=LOG_FORMAT, level=logging.DEBUG if DEBUG else logging.INFO)
+logger = logging.getLogger('amdgpufan')
+
+
+class Card:
+    def __init__(self, card_identifier, card_config, card_step):
+        self._identifier = card_identifier
+        self._config = card_config
+        self._step = card_step
+        self._hwmon = glob.glob(os.path.join(ROOT_DIR, card_identifier, HWMON_DIR) + '/hwmon?')[0]
+        logger.info(f'{card_identifier} hwmon device path resolved to {self._hwmon}')
+
+    def _validate_config(self):
+        points = numpy.array(self._config)
+        self.temps = points[:, 0]
+        self.speeds = points[:, 1]
+        if min(self.speeds) < self.pwm_min():
+            raise ValueError(f'fan curve for {self._identifier} has values lower than {self.pwm_min()}')
+        if max(self.speeds) > self.pwm_max():
+            raise ValueError(f'fan curve for {self._identifier} has values greater than {self.pwm_max()}')
+        if numpy.any(numpy.diff(self.temps) <= 0):
+            raise ValueError(f'fan curve for {self._identifier} points should be monotonically increasing, configuration error?')
+        if numpy.any(numpy.diff(self.speeds) < 0):
+            raise ValueError(f'fan curve for {self._identifier} speeds should be monotonically increasing, configuration error?')
+        logger.debug(f'{self._identifier} config appears to be valid')
+        return 0
+
+    def read_endpoint(self, endpoint):
+        with open(os.path.join(self._hwmon, endpoint), 'r') as e:
+            return e.read()
+
+    def write_endpoint(self, endpoint, data):
+        try:
+            with open(os.path.join(self._hwmon, endpoint), 'w') as e:
+                return e.write(str(data))
+        except PermissionError:
+            logger.error(f'failed writing to {os.path.join(self._hwmon, endpoint)}, are you running as root?')
+            sys.exit(1)
+
+    def edge_temp(self):
+        try:
+            return int(self.read_endpoint('temp1_input')) // 1000
+        except KeyError:
+            return 0
+
+    def junction_temp(self):
+        try:
+            return int(self.read_endpoint('temp2_input')) // 1000
+        except KeyError:
+            return 0
+
+    def mem_temp(self):
+        try:
+            return int(self.read_endpoint('temp3_input')) // 1000
+        except KeyError:
+            return 0
+
+    def pwm_max(self):
+        return int(self.read_endpoint('pwm1_max'))
+
+    def pwm_min(self):
+        return int(self.read_endpoint('pwm1_min'))
+
+    def set_pwm(self):
+        pwm1 = self.get_pwm()
+        temperatures = [self.edge_temp(), self.junction_temp(), self.mem_temp()]
+        logger.debug(f'{self._identifier} temperatures are {temperatures}')
+        temp = max(temperatures)
+        value = int(numpy.interp(x=temp, xp=self.temps, fp=self.speeds))
+        if (value > (pwm1 + self._step)) or (value < (pwm1 - self._step)):
+            logger.debug(f'{self._identifier} setting pwm to {value}')
+            self.write_endpoint('pwm1', value)
+        return 0
+
+    def get_pwm(self):
+        return int(self.read_endpoint('pwm1'))
+
+    def auto_mode(self):
+        logger.info(f'{self._identifier} setting auto_mode')
+        return self.write_endpoint('pwm1_enable', 2)
+
+    def manual_mode(self):
+        self._validate_config()
+        logger.info(f'{self._identifier} setting manual_mode')
+        #return self.write_endpoint('pwm1_enable', 1)
+
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--interval', type=int, default=3, help='interval of temperature check (default: %(default)s)')
+    parser.add_argument('--mindiff', type=int, default=3, help='minimum pwm diff to allow change (default: %(default)s)')
+    parser.add_argument('--config', type=pathlib.Path, default='/etc/amdgpufan.yaml', help='config file path (default: %(default)s)')
+    args = parser.parse_args()
+    
+    config = None
+    if os.path.isfile(args.config):
+        logger.info(f'loading config from {args.config}')
+        with open(args.config) as f:
+            config = yaml.safe_load(f)
+    if config is None:
+        logger.info(f'no config found at {args.config}')
+        sys.exit(1)
+
+    cards = {}
+    for card in config.get('cards', {}).keys():
+        cards[card] = Card(card, config['cards'].get(card), args.mindiff)
+        cards[card].manual_mode()
+
+    def sig_handler(signal, frames):
+        for card in cards:
+            cards[card].auto_mode()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGQUIT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+
+    while cards:
+        for card in cards:
+            cards[card].set_pwm()
+        time.sleep(args.interval)
+
+        
+if __name__ == '__main__':
+    main()
