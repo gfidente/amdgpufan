@@ -57,6 +57,7 @@ class Card:
             logger.error(f'failed writing to {os.path.join(self._hwmon, endpoint)}, are you running as root?')
             sys.exit(1)
 
+    #NOTE: floor division because pwm only accepts integers
     def edge_temp(self):
         try:
             return int(self.read_endpoint('temp1_input')) // 1000
@@ -85,8 +86,10 @@ class Card:
         pwm1 = self.get_pwm()
         temperatures = [self.edge_temp(), self.junction_temp(), self.mem_temp()]
         logger.debug(f'{self._identifier} temperatures are {temperatures}')
+        # depending on workload, either memory or gpu can be higher
         temp = max(temperatures)
         value = int(numpy.interp(x=temp, xp=self.temps, fp=self.speeds))
+        # do not cause stress with changes unless diverging significantly
         if (value > (pwm1 + self._step)) or (value < (pwm1 - self._step)):
             logger.debug(f'{self._identifier} setting pwm to {value}')
             self.write_endpoint('pwm1', value)
@@ -102,14 +105,14 @@ class Card:
     def manual_mode(self):
         self._validate_config()
         logger.info(f'{self._identifier} setting manual_mode')
-        #return self.write_endpoint('pwm1_enable', 1)
+        return self.write_endpoint('pwm1_enable', 1)
 
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--interval', type=int, default=3, help='interval of temperature check (default: %(default)s)')
-    parser.add_argument('--mindiff', type=int, default=3, help='minimum pwm diff to allow change (default: %(default)s)')
+    parser.add_argument('--mindiff', type=int, default=3, help='minimum pwm diff to implement (default: %(default)s)')
     parser.add_argument('--config', type=pathlib.Path, default='/etc/amdgpufan.yaml', help='config file path (default: %(default)s)')
     args = parser.parse_args()
     
