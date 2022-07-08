@@ -1,0 +1,8 @@
+[Unit]
+Description=AMD GPUs fan control daemon
+
+[Service]
+ExecStart=/usr/bin/amdgpufan
+
+[Install]
+WantedBy=sysinit.target
