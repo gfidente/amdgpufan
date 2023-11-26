@@ -57,6 +57,9 @@ class Card:
             elif x < d[i][0]:
                 output = d[i-1][1] + (x - d[i-1][0]) * ((d[i][1] - d[i-1][1])/(d[i][0] - d[i-1][0]))
                 break
+            else:
+                output = max(self.speeds)
+                break
         logger.debug(f'interpolate {x} to {int(output)}')
         return int(output)
 
