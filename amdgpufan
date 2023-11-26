@@ -10,7 +10,6 @@ import sys
 import time
 
 import yaml
-import numpy
 
 ROOT_DIR = '/sys/class/drm'
 HWMON_DIR = 'device/hwmon'
@@ -35,19 +34,31 @@ class Card:
         logger.info(f'{card_identifier} hwmon device path resolved to {self._hwmon}')
 
     def _validate_config(self):
-        points = numpy.array(self._config)
-        self.temps = points[:, 0]
-        self.speeds = points[:, 1]
+        points = self._config
+        self.temps = [row[0] for row in points]
+        self.speeds = [row[1] for row in points]
         if min(self.speeds) < self.pwm_min():
             raise ValueError(f'fan curve for {self._identifier} has values lower than {self.pwm_min()}')
         if max(self.speeds) > self.pwm_max():
             raise ValueError(f'fan curve for {self._identifier} has values greater than {self.pwm_max()}')
-        if numpy.any(numpy.diff(self.temps) <= 0):
-            raise ValueError(f'fan curve for {self._identifier} points should be monotonically increasing, configuration error?')
-        if numpy.any(numpy.diff(self.speeds) < 0):
-            raise ValueError(f'fan curve for {self._identifier} speeds should be monotonically increasing, configuration error?')
+        if any(self.temps[i] >= self.temps[i + 1] for i in range(len(self.temps) - 1)):
+            raise ValueError(f'fan curve for {self._identifier} points is not monotonically increasing, configuration error?')
+        if any(self.speeds[i] > self.speeds[i + 1] for i in range(len(self.speeds) - 1)):
+            raise ValueError(f'fan curve for {self._identifier} speeds is not monotonically increasing, configuration error?')
         logger.debug(f'{self._identifier} config appears to be valid')
         return 0
+
+    def _interpolate(self, x):
+        d = self._config
+        for i in range(len(self.temps) - 1):
+            if x == d[i][0]:
+                output = d[i][1]
+                break
+            elif x < d[i][0]:
+                output = d[i-1][1] + (x - d[i-1][0]) * ((d[i][1] - d[i-1][1])/(d[i][0] - d[i-1][0]))
+                break
+        logger.debug(f'interpolate {x} to {int(output)}')
+        return int(output)
 
     def read_endpoint(self, endpoint):
         with open(os.path.join(self._hwmon, endpoint), 'r') as e:
@@ -92,7 +103,7 @@ class Card:
         logger.debug(f'{self._identifier} temperatures are {temperatures}')
         # NOTE: depending on workload, either memory or gpu can be higher
         temp = max(temperatures)
-        value = int(numpy.interp(x=temp, xp=self.temps, fp=self.speeds))
+        value = self._interpolate(temp)
         # NOTE: do not cause stress with changes unless diverging significantly
         if (value > (pwm1 + self._step)) or (value < (pwm1 - self._step)):
             logger.debug(f'{self._identifier} setting pwm to {value}')
