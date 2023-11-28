@@ -49,6 +49,8 @@ class Card:
         return 0
 
     def _interpolate(self, x):
+        logger.debug(f'interpolating for {x} ...')
+        output = 127
         if x >= max(self.temps):
             output = max(self.speeds)
         elif x <= min(self.temps):
@@ -59,7 +61,7 @@ class Card:
                 if x <= d[i][0]:
                     output = d[i-1][1] + (x - d[i-1][0]) * ((d[i][1] - d[i-1][1])/(d[i][0] - d[i-1][0]))
                     break
-        logger.debug(f'interpolate {x} to {int(output)}')
+        logger.debug(f'... returning {int(output)}')
         return int(output)
 
     def read_endpoint(self, endpoint):
